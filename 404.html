@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script>
+  // クエリパラメータを保持したままindex.htmlにリダイレクト
+  var search = window.location.search;
+  var path = window.location.pathname;
+  sessionStorage.setItem('redirect', path + search);
+  window.location.replace('/interview-app/');
+</script>
+</head>
+</html>
