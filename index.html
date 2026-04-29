@@ -91,13 +91,9 @@
     <div class="header-title">AI録画面接システム</div>
     <div class="header-name" id="headerName"></div>
   </header>
-
-  <!-- ローディング -->
   <div id="pageLoading" class="page active">
     <div class="loading-page"><div class="spinner"></div></div>
   </div>
-
-  <!-- スタート画面 -->
   <div id="pageStart" class="page">
     <div class="start-wrap">
       <div class="start-icon">📋</div>
@@ -119,8 +115,6 @@
       </button>
     </div>
   </div>
-
-  <!-- 面接画面 -->
   <div id="pageInterview" class="page">
     <div class="interview-layout">
       <div class="progress-wrap">
@@ -150,8 +144,6 @@
       </div>
     </div>
   </div>
-
-  <!-- 完了画面 -->
   <div id="pageComplete" class="page">
     <div class="complete-wrap">
       <div class="complete-icon">✅</div>
@@ -159,8 +151,6 @@
       <p class="complete-sub">ご回答いただきありがとうございました。<br>録画データは正常に送信されました。<br>選考結果は別途メールにてご連絡いたします。</p>
     </div>
   </div>
-
-  <!-- エラー画面 -->
   <div id="pageError" class="page">
     <div class="complete-wrap">
       <div class="complete-icon" style="background:rgba(239,68,68,0.1);border-color:rgba(239,68,68,0.3);">⚠️</div>
@@ -169,19 +159,15 @@
     </div>
   </div>
 </div>
-
-<div class="overlay" id="overlay">
-  <div class="spinner"></div>
-  <div class="overlay-text" id="overlayText">処理中...</div>
-</div>
+<div class="overlay" id="overlay"><div class="spinner"></div><div class="overlay-text" id="overlayText">処理中...</div></div>
 <div class="toast" id="toast"></div>
 <audio id="audioPlayer"></audio>
 
 <script>
 // ============================================================
-// ★★★ ここを自分の環境に書き換えてください ★★★
+// ★★★ ここを書き換えてください ★★★
 // ============================================================
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbzGNfdLb0b32bn2EApZVBnWMwjDOTXviaDFMNtgVofT8ikd0kO154hseAQGKeBWfOw5/exec'; // GASのデプロイURL（/exec で終わるURL）
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbxzsO-ZWNPJ-8a_y0NROUIT5IsYia6U5hJ-1U_gOuHIdFWIyaxaTbrtrxfp8dny_Tk4/exec';
 // ============================================================
 
 const APP = {
@@ -194,9 +180,12 @@ const APP = {
   stream: null,
   recTimerInterval: null,
   recSeconds: 0,
+  // ★ 音声ミックス用（質問音声をカメラ映像と合成して録画）
+  audioDestination: null,
+  mixedStream: null,
 };
 
-// GitHub Pagesのリダイレクト対応：sessionStorageからパラメータを復元
+// GitHub Pages リダイレクト対応
 (function() {
   var redirect = sessionStorage.getItem('redirect');
   if (redirect && redirect !== location.pathname + location.search) {
@@ -204,49 +193,41 @@ const APP = {
     history.replaceState(null, null, redirect);
   }
 })();
-  
-// ── 初期化 ──────────────────────────────────
+
 window.addEventListener('DOMContentLoaded', async () => {
   const params = new URLSearchParams(location.search);
   APP.applicantId = params.get('applicantId') || '';
-
-  if (!APP.applicantId) {
-    showError('URLが無効です。招待メールのリンクをご確認ください。');
-    return;
-  }
-
-  // GASから志望者情報・質問を取得
+  if (!APP.applicantId) { showError('URLが無効です。招待メールのリンクをご確認ください。'); return; }
   try {
     const res = await gasGet({ action: 'get_interview_data', applicantId: APP.applicantId });
     if (!res.success) { showError(res.message); return; }
-
     APP.applicantName = res.applicantName;
     APP.questions = res.questions;
-
     document.getElementById('headerName').textContent = APP.applicantName;
     document.getElementById('welcomeMsg').textContent =
       APP.applicantName + ' さん、面接を開始する前に以下の注意事項をご確認ください。';
-
     showPage('pageStart');
   } catch (e) {
     showError('データの読み込みに失敗しました。時間をおいて再度お試しください。');
   }
 });
 
-// ── 面接開始 ────────────────────────────────
 async function startInterview() {
   document.getElementById('btnStart').disabled = true;
   showOverlay('カメラとマイクの準備中...');
-
   try {
-    APP.stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    // カメラ映像ストリーム取得
+    // ★ 低解像度・低フレームレートに設定して容量を削減
+    APP.stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 15, max: 15 } },
+      audio: true
+    });
   } catch (e) {
     hideOverlay();
     showToast('カメラまたはマイクへのアクセスが拒否されました。ブラウザのアドレスバー左の🔒アイコンから許可してください。');
     document.getElementById('btnStart').disabled = false;
     return;
   }
-
   try {
     const res = await gasPost({ action: 'start_interview', applicantId: APP.applicantId });
     if (!res.success) {
@@ -263,35 +244,98 @@ async function startInterview() {
     document.getElementById('btnStart').disabled = false;
     return;
   }
-
   hideOverlay();
   document.getElementById('cameraPreview').srcObject = APP.stream;
+
+  // ★ Web Audio API で質問音声とマイクをミックスして録画できるようにする
+  setupAudioMix();
+
   startRecording();
   showPage('pageInterview');
   updateProgress();
   playCurrentQuestion();
 }
 
-// ── 録画 ────────────────────────────────────
+// ============================================================
+// ★ 音声ミックスのセットアップ
+//    カメラのマイク音 + 質問音声スピーカー出力 → 録画に合成
+// ============================================================
+function setupAudioMix() {
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    // 録画先の出力ノード
+    APP.audioDestination = audioCtx.createMediaStreamDestination();
+
+    // カメラのマイク音をミックスに追加
+    const micSource = audioCtx.createMediaStreamSource(APP.stream);
+    micSource.connect(APP.audioDestination);
+
+    // audioPlayer（質問音声）の出力もミックスに追加
+    const audioEl = document.getElementById('audioPlayer');
+    const questionSource = audioCtx.createMediaElementSource(audioEl);
+    // スピーカーにも出力（志望者が聞こえるように）
+    questionSource.connect(audioCtx.destination);
+    // 録画にも出力
+    questionSource.connect(APP.audioDestination);
+
+    // カメラ映像トラック + ミックス済み音声トラック = 録画用ストリーム
+    const videoTrack = APP.stream.getVideoTracks()[0];
+    APP.mixedStream = new MediaStream([
+      videoTrack,
+      ...APP.audioDestination.stream.getAudioTracks()
+    ]);
+
+    APP.audioCtx = audioCtx;
+  } catch (e) {
+    // Web Audio API が使えない場合はカメラストリームをそのまま使う
+    console.warn('Web Audio API 初期化失敗、フォールバック:', e);
+    APP.mixedStream = APP.stream;
+  }
+}
+
+// ============================================================
+// ★ 録画（圧縮設定付き）
+// ============================================================
 function startRecording() {
   APP.recordedChunks = [];
   APP.recSeconds = 0;
-  const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
-    ? 'video/webm;codecs=vp9,opus' : 'video/webm';
-  APP.mediaRecorder = new MediaRecorder(APP.stream, { mimeType });
+
+  // ★ 低ビットレート設定で容量を削減（約500kbps）
+  const recStream = APP.mixedStream || APP.stream;
+  let mimeType = 'video/webm;codecs=vp9,opus';
+  let videoBitsPerSecond = 500000; // 500kbps
+
+  if (!MediaRecorder.isTypeSupported(mimeType)) {
+    mimeType = 'video/webm;codecs=vp8,opus';
+    if (!MediaRecorder.isTypeSupported(mimeType)) {
+      mimeType = 'video/webm';
+    }
+  }
+
+  try {
+    APP.mediaRecorder = new MediaRecorder(recStream, { mimeType, videoBitsPerSecond });
+  } catch (e) {
+    APP.mediaRecorder = new MediaRecorder(recStream);
+  }
+
   APP.mediaRecorder.ondataavailable = e => { if (e.data?.size > 0) APP.recordedChunks.push(e.data); };
   APP.mediaRecorder.start(1000);
+
   document.getElementById('recIndicator').classList.add('visible');
   document.getElementById('elapsedTimer').classList.add('visible');
+
   APP.recTimerInterval = setInterval(() => {
     APP.recSeconds++;
-    const m = String(Math.floor(APP.recSeconds/60)).padStart(2,'0');
-    const s = String(APP.recSeconds%60).padStart(2,'0');
+    const m = String(Math.floor(APP.recSeconds / 60)).padStart(2, '0');
+    const s = String(APP.recSeconds % 60).padStart(2, '0');
     document.getElementById('elapsedTimer').textContent = m + ':' + s;
   }, 1000);
 }
 
-// ── 質問再生 ─────────────────────────────────
+// ============================================================
+// 質問再生
+// ============================================================
 function playCurrentQuestion() {
   const q = APP.questions[APP.currentQ];
   if (!q) return;
@@ -306,15 +350,27 @@ function playCurrentQuestion() {
     audioWave.classList.add('playing');
     statusText.textContent = '質問を読み上げています...';
     statusText.style.color = '#60a5fa';
+
     const audio = document.getElementById('audioPlayer');
-    // Google DriveのURLを直接再生できる形式に変換
-    audio.src = convertDriveUrl(q.audioUrl);
-    audio.play().catch(() => {
-      audioWave.classList.remove('playing');
-      statusText.textContent = '▲ 音声を再生できません。質問文をご確認ください。';
-      statusText.style.color = '#f59e0b';
-      document.getElementById('btnNextQ').disabled = (APP.currentQ >= APP.questions.length - 1);
-    });
+    // ★ GAS経由で音声データをBase64で取得してBlobURLで再生（CORSを回避）
+    gasGet({ action: 'get_audio', audioUrl: q.audioUrl })
+      .then(res => {
+        if (res.success && res.audioBase64) {
+          const byteChars = atob(res.audioBase64);
+          const bytes = new Uint8Array(byteChars.length);
+          for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);
+          const blob = new Blob([bytes], { type: 'audio/mpeg' });
+          audio.src = URL.createObjectURL(blob);
+          audio.play().catch(err => {
+            console.warn('音声再生エラー:', err);
+            onAudioError(audioWave, statusText);
+          });
+        } else {
+          onAudioError(audioWave, statusText);
+        }
+      })
+      .catch(() => onAudioError(audioWave, statusText));
+
     audio.onended = () => {
       audioWave.classList.remove('playing');
       statusText.textContent = 'ご回答ください';
@@ -328,15 +384,13 @@ function playCurrentQuestion() {
   }
 }
 
-function convertDriveUrl(url) {
-  const m1 = url.match(/\/d\/([a-zA-Z0-9_-]+)/);
-  if (m1) return 'https://drive.google.com/uc?export=download&id=' + m1[1];
-  const m2 = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
-  if (m2) return 'https://drive.google.com/uc?export=download&id=' + m2[1];
-  return url;
+function onAudioError(audioWave, statusText) {
+  audioWave.classList.remove('playing');
+  statusText.textContent = '質問文をご確認の上、ご回答ください';
+  statusText.style.color = '#8892a4';
+  document.getElementById('btnNextQ').disabled = (APP.currentQ >= APP.questions.length - 1);
 }
 
-// ── 次の質問 ─────────────────────────────────
 function nextQuestion() {
   if (APP.currentQ < APP.questions.length - 1) {
     APP.currentQ++;
@@ -352,7 +406,9 @@ function updateProgress() {
   document.getElementById('btnNextQ').disabled = (APP.currentQ >= total - 1);
 }
 
-// ── 面接終了 ─────────────────────────────────
+// ============================================================
+// 面接終了・アップロード
+// ============================================================
 async function finishInterview() {
   if (!confirm('面接を終了しますか？\n録画データをアップロードします。')) return;
 
@@ -367,7 +423,6 @@ async function finishInterview() {
 
   const blob = new Blob(APP.recordedChunks, { type: 'video/webm' });
   const fileSizeMB = (blob.size / 1024 / 1024).toFixed(1);
-
   showOverlay('動画をアップロード中...<br><small>(' + fileSizeMB + ' MB) 数分かかる場合があります</small>');
 
   const base64 = await new Promise((res, rej) => {
@@ -403,14 +458,12 @@ async function finishInterview() {
   showPage('pageComplete');
 }
 
-// ── ユーティリティ ───────────────────────────
-// 修正後（no-corsではなくredirectをfollowに設定）
+// ============================================================
+// ユーティリティ
+// ============================================================
 async function gasGet(params) {
-  const qs = Object.entries(params).map(([k,v]) => k+'='+encodeURIComponent(v)).join('&');
-  const res = await fetch(GAS_URL + '?' + qs, {
-    redirect: 'follow',
-    method: 'GET',
-  });
+  const qs = Object.entries(params).map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&');
+  const res = await fetch(GAS_URL + '?' + qs, { redirect: 'follow' });
   return res.json();
 }
 
@@ -427,18 +480,11 @@ function showPage(id) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.getElementById(id).classList.add('active');
 }
-function showError(msg) {
-  document.getElementById('errorMsg').innerHTML = msg;
-  showPage('pageError');
-}
-function showOverlay(msg) {
-  document.getElementById('overlayText').innerHTML = msg;
-  document.getElementById('overlay').classList.add('visible');
-}
+function showError(msg) { document.getElementById('errorMsg').innerHTML = msg; showPage('pageError'); }
+function showOverlay(msg) { document.getElementById('overlayText').innerHTML = msg; document.getElementById('overlay').classList.add('visible'); }
 function hideOverlay() { document.getElementById('overlay').classList.remove('visible'); }
 function showToast(msg) {
-  const t = document.getElementById('toast');
-  t.textContent = msg; t.classList.add('visible');
+  const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('visible');
   setTimeout(() => t.classList.remove('visible'), 5000);
 }
 </script>
