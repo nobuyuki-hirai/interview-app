@@ -196,6 +196,15 @@ const APP = {
   recSeconds: 0,
 };
 
+// GitHub Pagesのリダイレクト対応：sessionStorageからパラメータを復元
+(function() {
+  var redirect = sessionStorage.getItem('redirect');
+  if (redirect && redirect !== location.pathname + location.search) {
+    sessionStorage.removeItem('redirect');
+    history.replaceState(null, null, redirect);
+  }
+})();
+  
 // ── 初期化 ──────────────────────────────────
 window.addEventListener('DOMContentLoaded', async () => {
   const params = new URLSearchParams(location.search);
