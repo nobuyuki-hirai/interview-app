@@ -395,16 +395,20 @@ async function finishInterview() {
 }
 
 // ── ユーティリティ ───────────────────────────
+// 修正後（no-corsではなくredirectをfollowに設定）
 async function gasGet(params) {
   const qs = Object.entries(params).map(([k,v]) => k+'='+encodeURIComponent(v)).join('&');
-  const res = await fetch(GAS_URL + '?' + qs);
+  const res = await fetch(GAS_URL + '?' + qs, {
+    redirect: 'follow',
+    method: 'GET',
+  });
   return res.json();
 }
 
 async function gasPost(data) {
   const res = await fetch(GAS_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'text/plain' },
+    redirect: 'follow',
     body: JSON.stringify(data),
   });
   return res.json();
